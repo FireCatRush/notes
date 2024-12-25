@@ -68,8 +68,7 @@ prompt可以是一组前景/背景点、一个粗糙的框或掩码、自由形�
 总结来说，作者的主要工作组件是**可提示分割模型**，它通过处理各种提示（如点、框、掩码）来生成分割掩码。与多任务分割系统不同，这种模型能够在推理时执行与训练任务不同的新任务，通过与其他组件（如对象检测器）的结合来实现复杂的分割任务。
 
 # Segment Anything Model
-![1](assert/SegmentAnythingModeloverview.png)
-![[SegmentAnythingModeloverview.png]]
+![SegmentAnythingModeloverview](assert/SegmentAnythingModeloverview.png)
 
 如上图所示，Segment Anything 有三个部分组成：an image encoder, a flexible prompt encoder, and a fast mask decoder.
 
@@ -107,7 +106,7 @@ prompt可以是一组前景/背景点、一个粗糙的框或掩码、自由形�
 
 #### **1. 空间分布（Spatial Distribution）**
 
-![[mask_spatial_distribution.png]]
+![mask_spatial_distribution.png](mask_spatial_distribution.png)
 - **对象中心分布**：SA-1B 的对象中心分布在图像中的覆盖范围较广，尤其在**图像角落**部分，相较于 **LVIS v1** 和 **ADE20K** 更均匀。
 - **中心偏差**：相比之下，**COCO** 和 **Open Images V5** 数据集在对象分布上存在明显的**中心偏差**，即对象更集中在图像中心区域。
 
@@ -639,7 +638,7 @@ SAM 被设计用于一个可提示的分割任务，但通过**提示工程（Pr
 
 轻量级掩码解码器 该模块有效地将图像嵌入和一组提示嵌入映射到输出掩码。为了组合这些输入，从Transformer分割模型中获得灵感，并修改了标准Transformer解码器。在应用解码器之前，首先在提示嵌入集中插入一个学习的输出令牌嵌入，该嵌入将在解码器的输出中使用。为了简单起见，我们将这些嵌入（不包括图像嵌入）统称为“令牌”
 
-![[mask_decoder_design.png]]
+![mask_decoder_design.png](mask_decoder_design.png)
 
 我们的解码器设计如上图所示。每个解码器层执行4个步骤：（1）对令牌的自注意力（2）从令牌（作为查询）到图像嵌入的交叉注意力（3）逐点MLP更新每个令牌，以及（4）从图像嵌入（作为查询的）到令牌的交叉关注。最后一步使用提示信息更新图像嵌入。在交叉关注期间，图像嵌入被视为642个256维向量的集合。每个自/交叉注意力和MLP在训练时都有残差连接、层归一化和dropout。下一解码器层从上一层获取更新的令牌和更新的图像嵌入。使用两层解码器。
 为了确保解码器能够访问关键的几何信息，每当位置编码参与注意力层时，都会将其添加到图像嵌入中。此外，当整个原始提示标记（包括它们的位置编码）参与注意力层时，它们都会被重新添加到更新的标记中。这允许强烈依赖提示标记的几何位置和类型。
