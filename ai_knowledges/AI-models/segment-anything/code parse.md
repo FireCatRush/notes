@@ -707,6 +707,13 @@ x = (attn @ v).view(B, self.num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(
 # window_partition
 
 该函数的核心目的是**将输入的特征图分割成多个不重叠的窗口**（Windows），在必要时进行**填充（Padding）**，以确保每个窗口的尺寸一致。这种操作常见于 **视觉Transformer（如 Swin Transformer）** 中，用于处理图像或特征图的局部区域信息。
+通过这样可以实现: 
+1. **局部感知**
+    - 将图像或特征图分割成小窗口，模型可以更有效地捕捉局部细节。
+2. **并行计算**
+    - 小窗口之间可以并行进行注意力机制计算，提升计算效率。
+3. **填充确保完整性**
+    - 保证分割后的每个窗口都是完整的，避免信息丢失。
 ```python
 def window_partition(x: torch.Tensor, window_size: int) -> Tuple[torch.Tensor, Tuple[int, int]]:  
     """  
@@ -770,14 +777,25 @@ $$
 - `num_windows = (Hp // window_size) * (Wp // window_size)`
 
 # window_unpartition
-
+**目的**：  
+将通过 `window_partition` 分割并填充的窗口重新拼接回**原始特征图**，并移除多余的填充。
+**场景**：  
+在 **视觉Transformer** 中，特征图被分成多个窗口进行局部注意力计算。完成局部计算后，这些窗口需要**还原**到原始的特征图中，并去除在 `window_partition` 阶段添加的多余填充。
 ```python 
 def window_unpartition(  
     windows: torch.Tensor, window_size: int, pad_hw: Tuple[int, int], hw: Tuple[int, int]  
 ) -> torch.Tensor:  
     """  
-    Window unpartition into original sequences and removing padding.    Args:        windows (tensor): input tokens with [B * num_windows, window_size, window_size, C].        window_size (int): window size.        pad_hw (Tuple): padded height and width (Hp, Wp).        hw (Tuple): original height and width (H, W) before padding.  
-    Returns:        x: unpartitioned sequences with [B, H, W, C].    """    Hp, Wp = pad_hw  
+    Window unpartition into original sequences and removing padding.    
+    Args:        
+	    windows (tensor): input tokens with [B * num_windows, window_size, window_size, C].        
+	    window_size (int): window size.        
+	    pad_hw (Tuple): padded height and width (Hp, Wp).        
+	    hw (Tuple): original height and width (H, W) before padding.  
+    Returns:        
+	    x: unpartitioned sequences with [B, H, W, C].    
+	"""    
+	Hp, Wp = pad_hw  
     H, W = hw  
     B = windows.shape[0] // (Hp * Wp // window_size // window_size)  
     x = windows.view(B, Hp // window_size, Wp // window_size, window_size, window_size, -1)  
@@ -786,4 +804,102 @@ def window_unpartition(
     if Hp > H or Wp > W:  
         x = x[:, :H, :W, :].contiguous()  
     return x
+```
+
+- 计算批量大小：
+$$
+\frac{B \times \text{num\_windows}}{\frac{H_p}{\text{window\_size}} \times \frac{W_p}{\text{window\_size}}}
+$$
+- 重塑窗口张量
+$$
+(B, H_p \, / \, \text{window\_size}, W_p \, / \, \text{window\_size}, \text{window\_size}, \text{window\_size}, C)
+$$
+- 调整维度顺序
+- 去除填充
+	- 如果填充后的尺寸 `Hp` 和 `Wp` 大于原始尺寸 `H` 和 `W`，则裁剪多余的部分。
+	- **`x[:, :H, :W, :]`**：仅保留原始特征图的高度 `H` 和宽度 `W`。
+	- **`contiguous`**：确保裁剪后的内存布局连续。
+ 
+ **为什么不是四个维度？**:
+**四个维度不足以表达所有信息**：
+- **如果直接用四个维度（B, Hp, Wp, C）**：
+    - 无法保留窗口内部的空间信息。
+    - `window_size × window_size` 的局部块信息将被打散。
+**五个维度的优势**：
+1. **空间信息保持**
+    - `(Hp // window_size, Wp // window_size)` 负责定位每个窗口在原始特征图中的位置。
+    - `(window_size, window_size)` 负责保留窗口内部的空间排列。
+2. **还原性**
+    - 这五个维度确保了可以轻松还原到原始特征图的空间结构。
+    - 后续使用 `permute` 和 `view` 操作将这些窗口拼接回 `(B, Hp, Wp, C)`。
+
+# Block
+该类是一个 **Transformer 块**，支持：
+- **窗口注意力机制（Window Attention）**
+- **全局注意力机制（Global Attention）**（当 `window_size = 0` 时）
+- **残差连接（Residual Connection）**
+- **MLP 块（MLP Block）**
+这种结构常见于视觉 Transformer（如 **Swin Transformer**），用于高效地捕捉图像特征的局部和全局依赖关系。
+```python
+class Block(nn.Module):  
+    """Transformer blocks with support of window attention and residual propagation blocks"""  
+  
+    def __init__(  
+        self,  
+        dim: int,  
+        num_heads: int,  
+        mlp_ratio: float = 4.0,  
+        qkv_bias: bool = True,  
+        norm_layer: Type[nn.Module] = nn.LayerNorm,  
+        act_layer: Type[nn.Module] = nn.GELU,  
+        use_rel_pos: bool = False,  
+        rel_pos_zero_init: bool = True,  
+        window_size: int = 0,  
+        input_size: Optional[Tuple[int, int]] = None,  
+    ) -> None:  
+        """  
+        Args:            
+	        dim (int): Number of input channels.            
+	        num_heads (int): Number of attention heads in each ViT block.   
+	        mlp_ratio (float): Ratio of mlp hidden dim to embedding dim.    
+	        qkv_bias (bool): If True, add a learnable bias to query, key, value.            
+	        norm_layer (nn.Module): Normalization layer.            act_layer (nn.Module): Activation layer.            
+	        use_rel_pos (bool): If True, add relative positional embeddings to the attention map.            
+	        rel_pos_zero_init (bool): If True, zero initialize relative positional parameters.            
+	        window_size (int): Window size for window attention blocks. If it equals 0, then use global attention.            
+	        input_size (tuple(int, int) or None): Input resolution for calculating the relative positional parameter size.        
+	    """        
+	    super().__init__()  
+        self.norm1 = norm_layer(dim)  
+        self.attn = Attention(  
+            dim,  
+            num_heads=num_heads,  
+            qkv_bias=qkv_bias,  
+            use_rel_pos=use_rel_pos,  
+            rel_pos_zero_init=rel_pos_zero_init,  
+            input_size=input_size if window_size == 0 else (window_size, window_size),  
+        )  
+  
+        self.norm2 = norm_layer(dim)  
+        self.mlp = MLPBlock(embedding_dim=dim, mlp_dim=int(dim * mlp_ratio), act=act_layer)  
+  
+        self.window_size = window_size  
+  
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  
+        shortcut = x  
+        x = self.norm1(x)  
+        # Window partition  
+        if self.window_size > 0:  
+            H, W = x.shape[1], x.shape[2]  
+            x, pad_hw = window_partition(x, self.window_size)  
+  
+        x = self.attn(x)  
+        # Reverse window partition  
+        if self.window_size > 0:  
+            x = window_unpartition(x, self.window_size, pad_hw, (H, W))  
+  
+        x = shortcut + x  
+        x = x + self.mlp(self.norm2(x))  
+  
+        return x
 ```
